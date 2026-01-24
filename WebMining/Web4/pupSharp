@@ -50,7 +50,7 @@ namespace RealHHruParser
         
         public async Task InitializeAsync()
         {
-            Console.WriteLine("🔄 Инициализация Puppeteer Sharp...");
+            Console.WriteLine("Инициализация Puppeteer Sharp...");
             
             // Загрузка браузера если нужно
             _fetcher = new BrowserFetcher();
@@ -58,7 +58,7 @@ namespace RealHHruParser
             
             if (!revisionInfo.Local)
             {
-                Console.WriteLine("📥 Скачивание браузера Chromium...");
+                Console.WriteLine("Скачивание браузера Chromium...");
                 _fetcher.DownloadProgressChanged += (sender, e) =>
                 {
                     Console.WriteLine($"   Прогресс: {e.ProgressPercentage}%");
@@ -86,7 +86,7 @@ namespace RealHHruParser
             _browser = await Puppeteer.LaunchAsync(launchOptions);
             _isInitialized = true;
             
-            Console.WriteLine("✅ Puppeteer Sharp инициализирован успешно\n");
+            Console.WriteLine("Puppeteer Sharp инициализирован успешно\n");
         }
         
         public async Task<List<Vacancy>> ParseVacanciesAsync(string searchQuery, int maxPages = 3)
@@ -111,7 +111,7 @@ namespace RealHHruParser
                 
                 for (int pageNum = 0; pageNum < maxPages; pageNum++)
                 {
-                    Console.WriteLine($"   📄 Страница {pageNum + 1}/{maxPages}...");
+                    Console.WriteLine($"Страница {pageNum + 1}/{maxPages}...");
                     
                     var url = $"https://hh.ru/search/vacancy?text={Uri.EscapeDataString(searchQuery)}&page={pageNum}&items_on_page=20";
                     
@@ -151,14 +151,14 @@ namespace RealHHruParser
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"     ❌ Ошибка при парсинге страницы: {ex.Message}");
+                        Console.WriteLine($" Ошибка при парсинге страницы: {ex.Message}");
                         break;
                     }
                 }
             }
             
             var duration = DateTime.Now - startTime;
-            Console.WriteLine($"\n✅ Парсинг завершен за {duration.TotalSeconds:F1} секунд");
+            Console.WriteLine($"\n Парсинг завершен за {duration.TotalSeconds:F1} секунд");
             Console.WriteLine($"   Всего найдено вакансий: {allVacancies.Count}");
             
             return allVacancies;
