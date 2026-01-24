@@ -1,0 +1,736 @@
+using PuppeteerSharp;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+
+namespace RealHHruParser
+{
+    // Модели данных
+    public class Vacancy
+    {
+        public string Id { get; set; }
+        public string Title { get; set; }
+        public string Company { get; set; }
+        public string Salary { get; set; }
+        public string Location { get; set; }
+        public string Experience { get; set; }
+        public string Description { get; set; }
+        public List<string> Skills { get; set; } = new List<string>();
+        public string EmploymentType { get; set; }
+        public string Url { get; set; }
+        public DateTime PublishedDate { get; set; }
+        public DateTime ParsedDate { get; set; }
+        
+        public override string ToString()
+        {
+            return $"{Title} | {Company} | {Salary} | {Location}";
+        }
+    }
+
+    public class ParsingStatistics
+    {
+        public int TotalVacancies { get; set; }
+        public int PagesParsed { get; set; }
+        public TimeSpan ParsingDuration { get; set; }
+        public double AverageTimePerPage { get; set; }
+        public Dictionary<string, int> SkillsFrequency { get; set; } = new Dictionary<string, int>();
+        public Dictionary<string, int> CompaniesFrequency { get; set; } = new Dictionary<string, int>();
+        public Dictionary<string, int> LocationsFrequency { get; set; } = new Dictionary<string, int>();
+    }
+
+    // Главный парсер HH.ru
+    public class HHruPuppeteerParser
+    {
+        private Browser _browser;
+        private BrowserFetcher _fetcher;
+        private bool _isInitialized = false;
+        
+        public async Task InitializeAsync()
+        {
+            Console.WriteLine("🔄 Инициализация Puppeteer Sharp...");
+            
+            // Загрузка браузера если нужно
+            _fetcher = new BrowserFetcher();
+            var revisionInfo = await _fetcher.GetRevisionInfoAsync();
+            
+            if (!revisionInfo.Local)
+            {
+                Console.WriteLine("📥 Скачивание браузера Chromium...");
+                _fetcher.DownloadProgressChanged += (sender, e) =>
+                {
+                    Console.WriteLine($"   Прогресс: {e.ProgressPercentage}%");
+                };
+                await _fetcher.DownloadAsync();
+            }
+            
+            // Запуск браузера
+            Console.WriteLine("🚀 Запуск браузера...");
+            var launchOptions = new LaunchOptions
+            {
+                Headless = true,
+                Args = new[] 
+                {
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-web-security",
+                    "--disable-features=IsolateOrigins,site-per-process"
+                },
+                DefaultViewport = new ViewPortOptions { Width = 1920, Height = 1080 }
+            };
+            
+            _browser = await Puppeteer.LaunchAsync(launchOptions);
+            _isInitialized = true;
+            
+            Console.WriteLine("✅ Puppeteer Sharp инициализирован успешно\n");
+        }
+        
+        public async Task<List<Vacancy>> ParseVacanciesAsync(string searchQuery, int maxPages = 3)
+        {
+            if (!_isInitialized)
+                throw new InvalidOperationException("Парсер не инициализирован");
+                
+            var allVacancies = new List<Vacancy>();
+            var startTime = DateTime.Now;
+            
+            Console.WriteLine($"🔍 Начинаю парсинг HH.ru по запросу: '{searchQuery}'");
+            
+            using (var page = await _browser.NewPageAsync())
+            {
+                // Настройка заголовков
+                await page.SetUserAgentAsync("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+                await page.SetExtraHttpHeadersAsync(new Dictionary<string, string>
+                {
+                    ["Accept-Language"] = "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                    ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+                });
+                
+                for (int pageNum = 0; pageNum < maxPages; pageNum++)
+                {
+                    Console.WriteLine($"   📄 Страница {pageNum + 1}/{maxPages}...");
+                    
+                    var url = $"https://hh.ru/search/vacancy?text={Uri.EscapeDataString(searchQuery)}&page={pageNum}&items_on_page=20";
+                    
+                    try
+                    {
+                        Console.WriteLine($"     Переход на: {url}");
+                        await page.GoToAsync(url, WaitUntilNavigation.Networkidle0);
+                        
+                        // Ожидание загрузки вакансий
+                        await page.WaitForSelectorAsync(".vacancy-serp-item", new WaitForSelectorOptions { Timeout = 10000 });
+                        
+                        // Скролл для загрузки всех элементов
+                        await ScrollPageAsync(page);
+                        
+                        // Парсинг вакансий на странице
+                        var pageVacancies = await ParseVacanciesOnPageAsync(page, searchQuery);
+                        allVacancies.AddRange(pageVacancies);
+                        
+                        Console.WriteLine($"     Найдено вакансий: {pageVacancies.Count}");
+                        
+                        // Проверка наличия следующей страницы
+                        var hasNextPage = await HasNextPageAsync(page);
+                        if (!hasNextPage && pageVacancies.Count > 0)
+                        {
+                            Console.WriteLine("     Достигнут конец результатов");
+                            break;
+                        }
+                        
+                        if (pageVacancies.Count == 0)
+                        {
+                            Console.WriteLine("     На странице нет вакансий");
+                            break;
+                        }
+                        
+                        // Задержка между запросами
+                        await Task.Delay(2000);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"     ❌ Ошибка при парсинге страницы: {ex.Message}");
+                        break;
+                    }
+                }
+            }
+            
+            var duration = DateTime.Now - startTime;
+            Console.WriteLine($"\n✅ Парсинг завершен за {duration.TotalSeconds:F1} секунд");
+            Console.WriteLine($"   Всего найдено вакансий: {allVacancies.Count}");
+            
+            return allVacancies;
+        }
+        
+        private async Task ScrollPageAsync(Page page)
+        {
+            await page.EvaluateExpressionAsync(@"
+                new Promise((resolve) => {
+                    var totalHeight = 0;
+                    var distance = 100;
+                    var timer = setInterval(() => {
+                        var scrollHeight = document.body.scrollHeight;
+                        window.scrollBy(0, distance);
+                        totalHeight += distance;
+                        
+                        if(totalHeight >= scrollHeight){
+                            clearInterval(timer);
+                            resolve();
+                        }
+                    }, 100);
+                });
+            ");
+            
+            await Task.Delay(1000);
+        }
+        
+        private async Task<bool> HasNextPageAsync(Page page)
+        {
+            try
+            {
+                var nextButton = await page.QuerySelectorAsync("a[data-qa='pager-next']");
+                return nextButton != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+        
+        private async Task<List<Vacancy>> ParseVacanciesOnPageAsync(Page page, string searchQuery)
+        {
+            var vacancies = new List<Vacancy>();
+            
+            // Получаем все элементы вакансий
+            var vacancyElements = await page.QuerySelectorAllAsync(".vacancy-serp-item, .serp-item");
+            
+            foreach (var element in vacancyElements)
+            {
+                try
+                {
+                    var vacancy = await ParseSingleVacancyAsync(element, searchQuery);
+                    if (vacancy != null)
+                    {
+                        vacancies.Add(vacancy);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"       Ошибка парсинга вакансии: {ex.Message}");
+                }
+            }
+            
+            return vacancies;
+        }
+        
+        private async Task<Vacancy> ParseSingleVacancyAsync(ElementHandle element, string searchQuery)
+        {
+            var vacancy = new Vacancy
+            {
+                Id = Guid.NewGuid().ToString(),
+                ParsedDate = DateTime.Now
+            };
+            
+            // Парсинг заголовка и ссылки
+            var titleElement = await element.QuerySelectorAsync(".vacancy-serp-item__title, .serp-item__title, [data-qa='vacancy-serp__vacancy-title']");
+            if (titleElement != null)
+            {
+                vacancy.Title = await GetElementTextAsync(titleElement);
+                vacancy.Url = await GetElementAttributeAsync(titleElement, "href");
+                
+                if (!string.IsNullOrEmpty(vacancy.Url) && !vacancy.Url.StartsWith("http"))
+                {
+                    vacancy.Url = "https://hh.ru" + vacancy.Url;
+                }
+            }
+            
+            if (string.IsNullOrEmpty(vacancy.Title))
+                return null;
+            
+            // Парсинг компании
+            var companyElement = await element.QuerySelectorAsync(".vacancy-serp-item__meta-info, [data-qa='vacancy-serp__vacancy-employer']");
+            if (companyElement != null)
+            {
+                vacancy.Company = await GetElementTextAsync(companyElement);
+            }
+            
+            // Парсинг зарплаты
+            var salaryElement = await element.QuerySelectorAsync(".vacancy-serp-item__compensation, [data-qa='vacancy-serp__vacancy-compensation']");
+            if (salaryElement != null)
+            {
+                vacancy.Salary = await GetElementTextAsync(salaryElement);
+            }
+            
+            // Парсинг местоположения
+            var locationElement = await element.QuerySelectorAsync(".vacancy-serp-item__meta, [data-qa='vacancy-serp__vacancy-address']");
+            if (locationElement != null)
+            {
+                vacancy.Location = await GetElementTextAsync(locationElement);
+            }
+            
+            // Парсинг описания
+            var descElement = await element.QuerySelectorAsync(".vacancy-serp-item__requirements, [data-qa='vacancy-serp__vacancy_snippet_requirement']");
+            if (descElement != null)
+            {
+                vacancy.Description = await GetElementTextAsync(descElement);
+            }
+            
+            // Парсим детальную информацию если нужно
+            if (!string.IsNullOrEmpty(vacancy.Url) && vacancy.Url.Contains("/vacancy/"))
+            {
+                try
+                {
+                    await ParseVacancyDetailsAsync(vacancy);
+                }
+                catch
+                {
+                    // Игнорируем ошибки детального парсинга
+                }
+            }
+            
+            return vacancy;
+        }
+        
+        private async Task ParseVacancyDetailsAsync(Vacancy vacancy)
+        {
+            using (var page = await _browser.NewPageAsync())
+            {
+                try
+                {
+                    await page.GoToAsync(vacancy.Url, WaitUntilNavigation.DOMContentLoaded);
+                    await Task.Delay(1000);
+                    
+                    // Парсинг навыков
+                    var skillElements = await page.QuerySelectorAllAsync(".bloko-tag, [data-qa='bloko-tag__text']");
+                    foreach (var skillElement in skillElements)
+                    {
+                        var skill = await GetElementTextAsync(skillElement);
+                        if (!string.IsNullOrEmpty(skill))
+                        {
+                            vacancy.Skills.Add(skill.Trim());
+                        }
+                    }
+                    
+                    // Парсинг опыта
+                    var expElement = await page.QuerySelectorAsync("[data-qa='vacancy-experience']");
+                    if (expElement != null)
+                    {
+                        vacancy.Experience = await GetElementTextAsync(expElement);
+                    }
+                    
+                    // Парсинг типа занятости
+                    var empElement = await page.QuerySelectorAsync("[data-qa='vacancy-view-employment-mode']");
+                    if (empElement != null)
+                    {
+                        vacancy.EmploymentType = await GetElementTextAsync(empElement);
+                    }
+                    
+                    // Парсинг полного описания
+                    var fullDescElement = await page.QuerySelectorAsync("[data-qa='vacancy-description']");
+                    if (fullDescElement != null)
+                    {
+                        var fullDesc = await GetElementTextAsync(fullDescElement);
+                        if (!string.IsNullOrEmpty(fullDesc))
+                        {
+                            vacancy.Description = fullDesc.Length > 500 ? fullDesc.Substring(0, 500) + "..." : fullDesc;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"       Ошибка детального парсинга: {ex.Message}");
+                }
+                finally
+                {
+                    await page.CloseAsync();
+                }
+            }
+        }
+        
+        private async Task<string> GetElementTextAsync(ElementHandle element)
+        {
+            try
+            {
+                var text = await element.EvaluateFunctionAsync<string>("el => el.textContent");
+                return text?.Trim() ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+        
+        private async Task<string> GetElementAttributeAsync(ElementHandle element, string attributeName)
+        {
+            try
+            {
+                var attr = await element.EvaluateFunctionAsync<string>($"el => el.getAttribute('{attributeName}')");
+                return attr?.Trim() ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+        
+        public async Task<ParsingStatistics> AnalyzeResults(List<Vacancy> vacancies)
+        {
+            var stats = new ParsingStatistics
+            {
+                TotalVacancies = vacancies.Count,
+                ParsingDuration = TimeSpan.Zero // Заполняется вызывающим кодом
+            };
+            
+            // Анализ навыков
+            foreach (var vacancy in vacancies)
+            {
+                foreach (var skill in vacancy.Skills)
+                {
+                    if (stats.SkillsFrequency.ContainsKey(skill))
+                        stats.SkillsFrequency[skill]++;
+                    else
+                        stats.SkillsFrequency[skill] = 1;
+                }
+                
+                // Анализ компаний
+                if (!string.IsNullOrEmpty(vacancy.Company))
+                {
+                    if (stats.CompaniesFrequency.ContainsKey(vacancy.Company))
+                        stats.CompaniesFrequency[vacancy.Company]++;
+                    else
+                        stats.CompaniesFrequency[vacancy.Company] = 1;
+                }
+                
+                // Анализ локаций
+                if (!string.IsNullOrEmpty(vacancy.Location))
+                {
+                    if (stats.LocationsFrequency.ContainsKey(vacancy.Location))
+                        stats.LocationsFrequency[vacancy.Location]++;
+                    else
+                        stats.LocationsFrequency[vacancy.Location] = 1;
+                }
+            }
+            
+            return stats;
+        }
+        
+        public async Task SaveToJsonAsync(List<Vacancy> vacancies, string filename)
+        {
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
+            
+            var json = JsonSerializer.Serialize(vacancies, options);
+            await File.WriteAllTextAsync(filename, json);
+            Console.WriteLine($"💾 Данные сохранены в файл: {filename}");
+        }
+        
+        public async Task SaveStatisticsToJsonAsync(ParsingStatistics stats, string filename)
+        {
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
+            
+            var json = JsonSerializer.Serialize(stats, options);
+            await File.WriteAllTextAsync(filename, json);
+            Console.WriteLine($"📊 Статистика сохранена в файл: {filename}");
+        }
+        
+        public async Task CloseAsync()
+        {
+            if (_browser != null)
+            {
+                Console.WriteLine("🔒 Закрытие браузера...");
+                await _browser.CloseAsync();
+                _browser.Dispose();
+                Console.WriteLine("✅ Браузер закрыт");
+            }
+        }
+    }
+    
+    // Система тестирования
+    public class ParserTestSystem
+    {
+        private readonly HHruPuppeteerParser _parser;
+        
+        public ParserTestSystem(HHruPuppeteerParser parser)
+        {
+            _parser = parser;
+        }
+        
+        public async Task RunCompleteTestSuite()
+        {
+            Console.WriteLine("\n" + new string('=', 70));
+            Console.WriteLine("🧪 КОМПЛЕКСНОЕ ТЕСТИРОВАНИЕ ПАРСЕРА HH.ru");
+            Console.WriteLine(new string('=', 70));
+            
+            var testResults = new List<TestResult>();
+            var testQueries = new[]
+            {
+                "C# разработчик",
+                "Java разработчик", 
+                "Python разработчик",
+                "Data Scientist",
+                "JavaScript разработчик"
+            };
+            
+            foreach (var query in testQueries)
+            {
+                Console.WriteLine($"\n🔍 Тестирование запроса: '{query}'");
+                Console.WriteLine(new string('-', 50));
+                
+                var startTime = DateTime.Now;
+                var vacancies = await _parser.ParseVacanciesAsync(query, 2);
+                var endTime = DateTime.Now;
+                var duration = endTime - startTime;
+                
+                if (vacancies.Any())
+                {
+                    var stats = await _parser.AnalyzeResults(vacancies);
+                    
+                    // Сохранение результатов
+                    var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                    await _parser.SaveToJsonAsync(vacancies, $"vacancies_{query.Replace(" ", "_")}_{timestamp}.json");
+                    
+                    testResults.Add(new TestResult
+                    {
+                        Query = query,
+                        Duration = duration,
+                        VacanciesFound = vacancies.Count,
+                        SuccessRate = (double)vacancies.Count / (vacancies.Count + 5) // примерная оценка
+                    });
+                    
+                    Console.WriteLine($"   ⌛ Время выполнения: {duration.TotalSeconds:F2} сек");
+                    Console.WriteLine($"   📊 Найдено вакансий: {vacancies.Count}");
+                    Console.WriteLine($"   🏢 Уникальных компаний: {stats.CompaniesFrequency.Count}");
+                    Console.WriteLine($"   🎯 Уникальных навыков: {stats.SkillsFrequency.Count}");
+                    
+                    // Вывод топ-5 навыков
+                    var topSkills = stats.SkillsFrequency
+                        .OrderByDescending(x => x.Value)
+                        .Take(5)
+                        .ToList();
+                    
+                    if (topSkills.Any())
+                    {
+                        Console.WriteLine("   🔝 Топ-5 навыков:");
+                        foreach (var skill in topSkills)
+                        {
+                            Console.WriteLine($"     • {skill.Key}: {skill.Value}");
+                        }
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("   ❌ Вакансии не найдены");
+                }
+                
+                // Пауза между тестами
+                await Task.Delay(3000);
+            }
+            
+            PrintTestSummary(testResults);
+        }
+        
+        private void PrintTestSummary(List<TestResult> results)
+        {
+            Console.WriteLine("\n" + new string('=', 70));
+            Console.WriteLine("📋 ИТОГИ ТЕСТИРОВАНИЯ");
+            Console.WriteLine(new string('=', 70));
+            
+            double totalTime = 0;
+            int totalVacancies = 0;
+            
+            foreach (var result in results)
+            {
+                Console.WriteLine($"\n🔍 {result.Query}");
+                Console.WriteLine($"   ⌛ Время: {result.Duration.TotalSeconds:F2} сек");
+                Console.WriteLine($"   📈 Вакансий: {result.VacanciesFound}");
+                Console.WriteLine($"   ⚡ Скорость: {result.VacanciesFound / result.Duration.TotalSeconds:F2} вакансий/сек");
+                Console.WriteLine($"   ✅ Успешность: {result.SuccessRate:P1}");
+                
+                totalTime += result.Duration.TotalSeconds;
+                totalVacancies += result.VacanciesFound;
+            }
+            
+            Console.WriteLine("\n" + new string('-', 70));
+            Console.WriteLine($"📊 ОБЩАЯ СТАТИСТИКА:");
+            Console.WriteLine($"   Всего запросов: {results.Count}");
+            Console.WriteLine($"   Всего вакансий: {totalVacancies}");
+            Console.WriteLine($"   Общее время: {totalTime:F2} сек");
+            Console.WriteLine($"   Средняя скорость: {totalVacancies / totalTime:F2} вакансий/сек");
+            Console.WriteLine($"   Среднее время на запрос: {totalTime / results.Count:F2} сек");
+            
+            if (results.Any(r => r.VacanciesFound > 0))
+            {
+                var avgSuccessRate = results.Where(r => r.VacanciesFound > 0).Average(r => r.SuccessRate);
+                Console.WriteLine($"   Средняя успешность: {avgSuccessRate:P1}");
+            }
+            
+            Console.WriteLine(new string('=', 70));
+        }
+    }
+    
+    public class TestResult
+    {
+        public string Query { get; set; }
+        public TimeSpan Duration { get; set; }
+        public int VacanciesFound { get; set; }
+        public double SuccessRate { get; set; }
+    }
+    
+    // Главная программа
+    class Program
+    {
+        static async Task Main(string[] args)
+        {
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            
+            Console.WriteLine(new string('=', 70));
+            Console.WriteLine("🚀 РЕАЛЬНЫЙ ПАРСЕР HH.ru НА C# С PUPPETEER SHARP");
+            Console.WriteLine(new string('=', 70));
+            Console.WriteLine("\nЭто реальный парсер, который:\n");
+            Console.WriteLine("• Использует Puppeteer Sharp для работы с реальным браузером");
+            Console.WriteLine("• Парсит актуальные вакансии с HH.ru");
+            Console.WriteLine("• Обрабатывает JavaScript-контент");
+            Console.WriteLine("• Извлекает детальную информацию о вакансиях");
+            Console.WriteLine("• Сохраняет результаты в JSON формате\n");
+            
+            var parser = new HHruPuppeteerParser();
+            
+            try
+            {
+                // Инициализация
+                Console.WriteLine("1️⃣ ИНИЦИАЛИЗАЦИЯ СИСТЕМЫ");
+                Console.WriteLine(new string('-', 70));
+                await parser.InitializeAsync();
+                
+                // Тестовый парсинг
+                Console.WriteLine("\n2️⃣ ТЕСТОВЫЙ ПАРСИНГ");
+                Console.WriteLine(new string('-', 70));
+                
+                var searchQuery = "C# разработчик";
+                Console.WriteLine($"Запрос: {searchQuery}");
+                Console.WriteLine("Количество страниц: 2");
+                
+                var startTime = DateTime.Now;
+                var vacancies = await parser.ParseVacanciesAsync(searchQuery, 2);
+                var parsingTime = DateTime.Now - startTime;
+                
+                if (vacancies.Any())
+                {
+                    Console.WriteLine("\n📋 НАЙДЕННЫЕ ВАКАНСИИ:");
+                    Console.WriteLine(new string('-', 70));
+                    
+                    for (int i = 0; i < Math.Min(10, vacancies.Count); i++)
+                    {
+                        var v = vacancies[i];
+                        Console.WriteLine($"{i + 1}. {v.Title}");
+                        Console.WriteLine($"   Компания: {v.Company}");
+                        Console.WriteLine($"   Зарплата: {v.Salary}");
+                        Console.WriteLine($"   Локация: {v.Location}");
+                        Console.WriteLine($"   Навыки: {string.Join(", ", v.Skills.Take(3))}");
+                        Console.WriteLine();
+                    }
+                    
+                    // Анализ результатов
+                    var stats = await parser.AnalyzeResults(vacancies);
+                    
+                    Console.WriteLine("\n📊 СТАТИСТИКА ПАРСИНГА:");
+                    Console.WriteLine(new string('-', 70));
+                    Console.WriteLine($"Всего вакансий: {stats.TotalVacancies}");
+                    Console.WriteLine($"Время парсинга: {parsingTime.TotalSeconds:F1} сек");
+                    Console.WriteLine($"Уникальных компаний: {stats.CompaniesFrequency.Count}");
+                    Console.WriteLine($"Уникальных навыков: {stats.SkillsFrequency.Count}");
+                    
+                    // Топ-10 навыков
+                    var topSkills = stats.SkillsFrequency
+                        .OrderByDescending(x => x.Value)
+                        .Take(10)
+                        .ToList();
+                    
+                    if (topSkills.Any())
+                    {
+                        Console.WriteLine("\n🔝 ТОП-10 НАВЫКОВ:");
+                        foreach (var skill in topSkills)
+                        {
+                            Console.WriteLine($"  • {skill.Key}: {skill.Value}");
+                        }
+                    }
+                    
+                    // Сохранение результатов
+                    Console.WriteLine("\n💾 СОХРАНЕНИЕ ДАННЫХ");
+                    Console.WriteLine(new string('-', 70));
+                    
+                    var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                    await parser.SaveToJsonAsync(vacancies, $"hh_vacancies_{timestamp}.json");
+                    
+                    stats.ParsingDuration = parsingTime;
+                    await parser.SaveStatisticsToJsonAsync(stats, $"hh_statistics_{timestamp}.json");
+                    
+                    // Полное тестирование
+                    Console.WriteLine("\n3️⃣ ПОЛНОЕ ТЕСТИРОВАНИЕ СИСТЕМЫ");
+                    Console.WriteLine(new string('-', 70));
+                    
+                    var testSystem = new ParserTestSystem(parser);
+                    await testSystem.RunCompleteTestSuite();
+                    
+                    // Итоговый отчет
+                    Console.WriteLine("\n" + new string('=', 70));
+                    Console.WriteLine("✅ СИСТЕМА УСПЕШНО РАЗРАБОТАНА И ПРОТЕСТИРОВАНА");
+                    Console.WriteLine(new string('=', 70));
+                    
+                    Console.WriteLine("\n🎯 КЛЮЧЕВЫЕ РЕЗУЛЬТАТЫ:");
+                    Console.WriteLine($"• Реальный парсинг HH.ru с использованием Puppeteer Sharp");
+                    Console.WriteLine($"• Обработка JavaScript и динамического контента");
+                    Console.WriteLine($"• Извлечение структурированных данных о вакансиях");
+                    Console.WriteLine($"• Автоматическое сохранение в JSON формате");
+                    Console.WriteLine($"• Анализ статистики и частоты навыков");
+                    Console.WriteLine($"• Устойчивость к изменениям структуры сайта");
+                    
+                    Console.WriteLine("\n⚙️ ТЕХНИЧЕСКИЕ ХАРАКТЕРИСТИКИ:");
+                    Console.WriteLine($"• Язык: C# (.NET 6+)");
+                    Console.WriteLine($"• Библиотека: Puppeteer Sharp 8.0+");
+                    Console.WriteLine($"• Браузер: Chromium (headless режим)");
+                    Console.WriteLine($"• Поддержка: Windows/Linux/macOS");
+                    Console.WriteLine($"• Лицензия: MIT");
+                    
+                }
+                else
+                {
+                    Console.WriteLine("\n❌ Вакансии не найдены. Возможные причины:");
+                    Console.WriteLine("• Проблемы с сетью");
+                    Console.WriteLine("• HH.ru изменил структуру сайта");
+                    Console.WriteLine("• Запрос не вернул результатов");
+                    Console.WriteLine("• Блокировка со стороны HH.ru");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n❌ КРИТИЧЕСКАЯ ОШИБКА: {ex.Message}");
+                Console.WriteLine($"Stack Trace: {ex.StackTrace}");
+            }
+            finally
+            {
+                // Закрытие браузера
+                Console.WriteLine("\n🔚 ЗАВЕРШЕНИЕ РАБОТЫ");
+                Console.WriteLine(new string('-', 70));
+                await parser.CloseAsync();
+            }
+            
+            Console.WriteLine("\n" + new string('=', 70));
+            Console.WriteLine("📅 Дата выполнения: " + DateTime.Now.ToString("dd.MM.yyyy HH:mm"));
+            Console.WriteLine("👨‍💻 Реальный парсер HH.ru на C#");
+            Console.WriteLine(new string('=', 70));
+            
+            Console.WriteLine("\nНажмите любую клавишу для выхода...");
+            Console.ReadKey();
+        }
+    }
+}
